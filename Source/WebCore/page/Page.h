@@ -1357,6 +1357,7 @@ public:
     bool shouldDeferResizeEvents() const { return m_shouldDeferResizeEvents; }
     WEBCORE_EXPORT void NODELETE startDeferringResizeEvents();
     WEBCORE_EXPORT void flushDeferredResizeEvents();
+    void setNeedsMouseEventTargetUpdateAfterDeferredResize() { m_needsMouseEventTargetUpdateAfterDeferredResize = true; }
 
     bool shouldDeferScrollEvents() const { return m_shouldDeferScrollEvents; }
     WEBCORE_EXPORT void NODELETE startDeferringScrollEvents();
@@ -1882,6 +1883,7 @@ private:
     std::unique_ptr<LoginStatus> m_lastAuthentication;
 
     bool m_shouldDeferResizeEvents { false };
+    bool m_needsMouseEventTargetUpdateAfterDeferredResize { false };
     bool m_shouldDeferScrollEvents { false };
     bool m_shouldDeferIntersectionObservations { false };
     MonotonicTime m_lastResizeTimeForIOQuirk;
