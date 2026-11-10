@@ -472,6 +472,7 @@ void EventHandler::clear()
     m_resizeLayer = nullptr;
     clearElementUnderMouse();
     m_lastElementUnderMouse = nullptr;
+    m_ancestorsOfLastElementUnderMouse.clear();
     m_lastMouseMoveEventSubframe = nullptr;
     m_lastScrollbarUnderMouse = nullptr;
     m_clickCount = 0;
@@ -3106,24 +3107,37 @@ void EventHandler::updateMouseEventTargetNode(const AtomString& eventType, Node*
 
     // Fire mouseout/mouseover if the mouse has shifted to a different node.
     if (fireMouseOverOut == FireMouseOverOut::Yes) {
-        notifyScrollableAreasOfMouseEvents(eventType, m_lastElementUnderMouse, m_elementUnderMouse);
-
         if (m_lastElementUnderMouse && &m_lastElementUnderMouse->document() != frame->document()) {
             m_lastElementUnderMouse = nullptr;
+            m_ancestorsOfLastElementUnderMouse.clear();
             m_lastScrollbarUnderMouse = nullptr;
         }
 
-        if (m_lastElementUnderMouse != m_elementUnderMouse) {
+        RefPtr<Element> lastConnectedAncestorUnderMouse;
+        if (!m_lastElementUnderMouse) {
+            for (auto& weakAncestor : m_ancestorsOfLastElementUnderMouse) {
+                if (RefPtr ancestor = weakAncestor.get(); ancestor && ancestor->isConnected() && &ancestor->document() == frame->document()) {
+                    lastConnectedAncestorUnderMouse = WTF::move(ancestor);
+                    break;
+                }
+            }
+            if (!lastConnectedAncestorUnderMouse)
+                m_ancestorsOfLastElementUnderMouse.clear();
+        }
+
+        notifyScrollableAreasOfMouseEvents(eventType, m_lastElementUnderMouse ? m_lastElementUnderMouse.get() : lastConnectedAncestorUnderMouse.get(), m_elementUnderMouse.get());
+
+        if (m_lastElementUnderMouse != m_elementUnderMouse || (!m_elementUnderMouse && lastConnectedAncestorUnderMouse)) {
             // mouseenter and mouseleave events are only dispatched if there is a capturing eventhandler on an ancestor
             // or a normal eventhandler on the element itself (they don't bubble).
             // This optimization is necessary since these events can cause O(n^2) capturing event-handler checks.
             auto& eventNames = WebCore::eventNames();
-            bool hasCapturingMouseEnterListener = hierarchyHasCapturingEventListeners(m_elementUnderMouse, eventNames.pointerenterEvent, eventNames.mouseenterEvent);
-            bool hasCapturingMouseLeaveListener = hierarchyHasCapturingEventListeners(m_lastElementUnderMouse, eventNames.pointerleaveEvent, eventNames.mouseleaveEvent);
-
             Vector<Ref<Element>, 32> leftElementsChain;
-            for (RefPtr element = m_lastElementUnderMouse; element; element = element->parentElementInComposedTree())
+            for (RefPtr element = m_lastElementUnderMouse ? m_lastElementUnderMouse : lastConnectedAncestorUnderMouse; element; element = element->parentElementInComposedTree())
                 leftElementsChain.append(*element);
+
+            bool hasCapturingMouseEnterListener = hierarchyHasCapturingEventListeners(m_elementUnderMouse.get(), eventNames.pointerenterEvent, eventNames.mouseenterEvent);
+            bool hasCapturingMouseLeaveListener = hierarchyHasCapturingEventListeners(leftElementsChain.isEmpty() ? nullptr : leftElementsChain.first().ptr(), eventNames.pointerleaveEvent, eventNames.mouseleaveEvent);
             Vector<WeakPtr<Element, WeakPtrImplWithEventTargetData>, 32> elementsUnderMouse;
             for (RefPtr element = m_elementUnderMouse; element; element = element->parentElementInComposedTree())
                 elementsUnderMouse.append(element);
@@ -3230,19 +3244,33 @@ void EventHandler::updateMouseEventTargetAfterLayoutIfNeeded()
 
     Ref frame = m_frame.get();
     RefPtr view = frame->view();
-    if (!view || !m_elementUnderMouse)
+    if (!view || (!m_elementUnderMouse && m_ancestorsOfLastElementUnderMouse.isEmpty() && !m_lastMouseMoveEventSubframe))
         return;
 
     if (m_lastKnownMousePositionSource == LastKnownMousePositionSource::Touch)
         return;
 
+    RefPtr page = frame->page();
+#if ENABLE(POINTER_LOCK)
+    if (page && page->pointerLockController().isLocked())
+        return;
+#endif
+
     RefPtr document = frame->document();
+#if ENABLE(FULLSCREEN_API)
+    if (RefPtr documentFullscreen = document ? document->fullscreenIfExists() : nullptr; documentFullscreen && documentFullscreen->isAnimatingFullscreen())
+        return;
+#endif
+    if (page && page->shouldDeferResizeEvents())
+        return;
 
     // Clear element tracking if there's a document mismatch.
-    if ((&m_elementUnderMouse->document() != document)
+    if ((m_elementUnderMouse && &m_elementUnderMouse->document() != document)
         || (m_lastElementUnderMouse && &m_lastElementUnderMouse->document() != document)) {
-        m_elementUnderMouse = nullptr;
+        clearElementUnderMouse();
         m_lastElementUnderMouse = nullptr;
+        m_ancestorsOfLastElementUnderMouse.clear();
+        m_lastMouseMoveEventSubframe = nullptr;
         return;
     }
 
@@ -3263,7 +3291,14 @@ void EventHandler::updateMouseEventTargetAfterLayoutIfNeeded()
     } else
         targetElement = m_capturingMouseEventsElement.get();
 
-    if (targetElement && (targetElement != m_elementUnderMouse)) {
+    RefPtr localSubframe = dynamicDowncast<LocalFrame>(m_capturingMouseEventsElement ? subframeForTargetNode(m_capturingMouseEventsElement.get()) : subframeForTargetNode(targetElement.get()));
+    if (RefPtr lastMouseMoveEventSubframe = m_lastMouseMoveEventSubframe; lastMouseMoveEventSubframe && lastMouseMoveEventSubframe->tree().isDescendantOf(frame.ptr()) && lastMouseMoveEventSubframe != localSubframe) {
+        lastMouseMoveEventSubframe->eventHandler().setLastKnownMousePosition(valueOrDefault(m_lastKnownMousePosition), m_lastKnownMouseGlobalPosition, std::optional<LastKnownMousePositionSource> { m_lastKnownMousePositionSource });
+        lastMouseMoveEventSubframe->eventHandler().updateMouseEventTargetAfterLayoutIfNeeded();
+        m_lastMouseMoveEventSubframe = nullptr;
+    }
+
+    if (targetElement != m_elementUnderMouse || (!targetElement && !m_ancestorsOfLastElementUnderMouse.isEmpty())) {
         // Create a synthetic mouse event and update the mouse event target node in order to trigger
         // boundary event processing.
         auto modifiers = PlatformKeyboardEvent::currentStateOfModifierKeys();
@@ -3274,8 +3309,13 @@ void EventHandler::updateMouseEventTargetAfterLayoutIfNeeded()
         // mouse moving. In this case, the mouse did not move, but the element under the mouse still changed,
         // so we treat it internally as a mousemove event.
         updateMouseEventTargetNode(eventNames().mousemoveEvent, targetElement.get(), syntheticEvent, FireMouseOverOut::Yes);
-        if (document)
-            document->updateHoverActiveState(hoverTimerHitType, targetElement.get());
+        if (document && document == frame->document())
+            document->updateHoverActiveState(hoverTimerHitType, (targetElement && &targetElement->document() == document) ? targetElement.get() : nullptr);
+    }
+
+    if (localSubframe && localSubframe == m_lastMouseMoveEventSubframe && localSubframe->view()) {
+        localSubframe->eventHandler().setLastKnownMousePosition(valueOrDefault(m_lastKnownMousePosition), m_lastKnownMouseGlobalPosition, std::optional<LastKnownMousePositionSource> { m_lastKnownMousePositionSource });
+        localSubframe->eventHandler().updateMouseEventTargetAfterLayoutIfNeeded();
     }
 }
 
