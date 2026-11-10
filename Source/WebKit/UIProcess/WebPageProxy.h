@@ -1383,11 +1383,15 @@ public:
     RemoteObjectRegistry* uiRemoteObjectRegistry();
 
     void windowAndViewFramesChanged(const WebCore::FloatRect& viewFrameInWindowCoordinates, const WebCore::FloatPoint& accessibilityViewCoordinates);
+    void updateMouseEventTargetAfterWindowAndViewFramesChanged();
     void setMainFrameIsScrollable(bool);
     bool shouldDelayWindowOrderingForEvent(Ref<WebMouseEvent>&&);
     void setRemoteLayerTreeRootNode(RemoteLayerTreeNode*);
 
 #if PLATFORM(MAC)
+    void noteMouseEventHandledForFrameUpdate() { ++m_handledMouseEventCount; }
+    void willScheduleWindowAndViewFramesUpdate() { m_mouseEventCountForPendingWindowAndViewFrameUpdate = m_handledMouseEventCount; }
+
     CALayer *acceleratedCompositingRootLayer() const;
 
     CALayer *headerBannerLayer() const;
@@ -3109,8 +3113,6 @@ private:
 
     bool shouldForceForegroundPriorityForClientNavigation() const;
 
-    void updateMouseEventTargetAfterWindowAndViewFramesChanged(const WebCore::FloatRect&);
-
     bool canCreateFrame(WebCore::FrameIdentifier) const;
     Ref<WebPageProxy> downloadOriginatingPage(const API::Navigation*);
     Ref<WebPageProxy> navigationOriginatingPage(const FrameInfoData&);
@@ -4183,6 +4185,8 @@ private:
 #endif
 #if PLATFORM(MAC)
     std::unique_ptr<ViewWindowCoordinates> m_viewWindowCoordinates;
+    uint64_t m_handledMouseEventCount { 0 };
+    uint64_t m_mouseEventCountForPendingWindowAndViewFrameUpdate { 0 };
 #endif
 
     std::optional<WebCore::ScrollbarOverlayStyle> m_scrollbarOverlayStyle;
